@@ -1,0 +1,5 @@
+# Release validation uses these exact tools with build isolation disabled.
+build==1.6.1
+twine==6.2.0
+setuptools==84.0.0
+wheel==0.48.0
