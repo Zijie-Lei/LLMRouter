@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit_tests:
+    name: Unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      TOKENIZERS_PARALLELISM: "false"
+      LLMROUTER_EMBEDDING_DEVICE: cpu
+      CUDA_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONHASHSEED: "0"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            .github/workflows/ci.yml
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "torch==2.8.0" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --editable ".[test,routefm]" "torch==2.8.0"
+          python -m pip check
+      - name: Test routing, CLI, HTTP, and plugin adapters
+        run: >-
+          python -m pytest
+          --disable-socket --allow-unix-socket
+          --cov=llmrouter --cov=openclaw_router --cov=custom_routers
+          --cov-report=term --cov-report=xml:coverage/core.xml
+          --junitxml=test-results/core.xml
+      # FusionGate's test bootstrap changes import state. Keep it in its own process.
+      - name: Test FusionGate
+        run: >-
+          python -m pytest custom_routers/fusion_gate/tests
+          --disable-socket --allow-unix-socket
+          --cov=custom_routers/fusion_gate
+          --cov-report=term --cov-report=xml:coverage/fusion.xml
+          --junitxml=test-results/fusion.xml
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-reports-python-${{ matrix.python }}
+          path: |
+            test-results/*.xml
+            coverage/*.xml
+          retention-days: 14
+
+  package:
+    name: Build package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Build and validate distributions
+        run: |
+          python -m pip install "build>=1,<2" "twine>=6,<7"
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Verify installed CLI
+        run: |
+          python -m pip install --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          llmrouter --help
+
+  ci:
+    name: CI
+    if: ${{ always() }}
+    needs: [unit_tests, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require successful tests and package build
+        env:
+          UNIT_TESTS_RESULT: ${{ needs.unit_tests.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          test "$UNIT_TESTS_RESULT" = success
+          test "$PACKAGE_RESULT" = success

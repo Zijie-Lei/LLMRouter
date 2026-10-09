@@ -67,6 +67,7 @@
 - [Adding Your Own Tasks](#-adding-your-own-tasks)
 - [xRouteBench Benchmark Pipeline](#-xroutebench-benchmark-pipeline)
 - [OpenClaw Router (OpenClaw Integration)](#-openclaw-router-openclaw-integration)
+- [Contributing and automated checks](CONTRIBUTING.md)
 - [Acknowledgments](#-acknowledgments)
 - [Citation](#-citation)
 

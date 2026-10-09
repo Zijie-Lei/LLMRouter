@@ -56,6 +56,8 @@ classifiers = [
 "Bug Tracker" = "https://github.com/ulab-uiuc/LLMRouter/issues"
 
 [project.optional-dependencies]
+# Development dependencies for the offline unit test suites.
+test = ["pytest>=8.3,<9", "pytest-cov>=6,<7", "pytest-socket>=0.7,<1"]
 # RouterR1 requires vLLM (GPU only)
 router-r1 = ["vllm==0.6.3", "torch==2.4.0", "openai>=1.0"]
 # RouteFM is a frozen in-context router with a BGE text interface.
@@ -74,3 +76,19 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["llmrouter*", "openclaw_router*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "custom_routers/routefm_router/tests"]
+pythonpath = [".", "tests"]
+norecursedirs = ["train_test", "inference_test"]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--import-mode=importlib",
+  "--ignore=tests/test_websocket.py",
+  "-ra",
+]
+filterwarnings = ["error::pytest.PytestReturnNotNoneWarning"]
+
+[tool.coverage.run]
+omit = ["*/tests/*"]

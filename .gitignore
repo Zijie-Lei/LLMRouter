@@ -21,9 +21,17 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/
+
+# Test reports
+.pytest_cache/
+.coverage
+.coverage.*
+coverage/
+test-results/
 
 # IDE
 .vscode/
