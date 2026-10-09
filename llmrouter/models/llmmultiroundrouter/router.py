@@ -1,9 +1,20 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import os
 import torch.nn as nn
 import copy
 from llmrouter.models.meta_router import MetaRouter
 from llmrouter.utils import call_api, generate_task_query, calculate_task_performance
+
+
+def _api_failure(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Keep provider failure metadata separate from response text."""
+    if "error" in result:
+        error = result["error"]
+    elif result.get("response") is None:
+        error = "API did not return a response"
+    else:
+        return None
+    return {**result, "success": False, "error": error}
 
 # Optional imports for local LLM inference
 try:
@@ -124,18 +135,56 @@ class LLMMultiRoundRouter(MetaRouter):
             chat_mode = False
             query_dict = query
         
-        # Step 1: Decompose query into sub-queries and route each (in one LLM call)
-        sub_query_routes = self._decompose_and_route(original_query)
-        sub_queries = [sq for sq, _ in sub_query_routes]
-        
-        # Step 2: Execute each sub-query with the routed model
         sub_responses = []
-        for sub_query, model_name in sub_query_routes:
-            execution_result = self._execute_sub_query(sub_query, model_name)
-            sub_responses.append(execution_result)
-        
-        # Step 3: Aggregate responses into final answer
-        final_answer = self._aggregate_responses(original_query, sub_queries, sub_responses, task_name)
+
+        def failed(result, stage):
+            output = copy.copy(query_dict)
+            output.update({
+                "response": result.get("response", ""),
+                "success": False,
+                "error": result.get("error", f"{stage} failed"),
+                "failure_stage": stage,
+                "prompt_tokens": sum(r.get("prompt_tokens", 0) for r in sub_responses),
+                "completion_tokens": sum(r.get("completion_tokens", 0) for r in sub_responses),
+            })
+            output["input_token"] = output["prompt_tokens"]
+            output["output_token"] = output["completion_tokens"]
+            for key in ("model_name", "api_model_name"):
+                if key in result:
+                    output[key] = result[key]
+            if "api_name" in result:
+                output["api_model_name"] = result["api_name"]
+            if any(key in query_dict for key in ("ground_truth", "gt", "answer")):
+                output["task_performance"] = 0.0
+            return (output["response"] or f"Error: {output['error']}") if chat_mode else output
+
+        stage = "decomposition"
+        model_name = None
+        try:
+            sub_query_routes = self._decompose_and_route(original_query)
+            if isinstance(sub_query_routes, dict):
+                return failed(sub_query_routes, stage)
+            sub_queries = [sq for sq, _ in sub_query_routes]
+
+            stage = "execution"
+            for sub_query, model_name in sub_query_routes:
+                execution_result = self._execute_sub_query(sub_query, model_name)
+                sub_responses.append(execution_result)
+                if not execution_result.get("success", False):
+                    return failed(execution_result, stage)
+
+            stage = "aggregation"
+            final_answer = self._aggregate_responses(original_query, sub_queries, sub_responses, task_name)
+            if isinstance(final_answer, dict):
+                return failed(final_answer, stage)
+        except Exception as error:
+            result = {"response": "", "error": str(error)}
+            failed_model = self.base_model if stage in {"decomposition", "aggregation"} else model_name
+            if failed_model is not None:
+                result["model_name"] = failed_model
+                metadata = getattr(self, "llm_data", None) or {}
+                result["api_model_name"] = metadata.get(failed_model, {}).get("model", failed_model)
+            return failed(result, stage)
 
         # Chat mode: return response string only
         if chat_mode:
@@ -394,7 +443,7 @@ class LLMMultiRoundRouter(MetaRouter):
         
         return "qwen/qwen2.5-3b-instruct"
     
-    def _decompose_and_route(self, query: str) -> List[tuple]:
+    def _decompose_and_route(self, query: str) -> Union[List[tuple], Dict[str, Any]]:
         """
         Decompose a query into sub-queries and route each using LLM in a single step.
         
@@ -402,7 +451,7 @@ class LLMMultiRoundRouter(MetaRouter):
             query: Original query to decompose and route
             
         Returns:
-            List of (sub_query, model_name) tuples
+            List of (sub_query, model_name) tuples, or a provider failure dict.
         """
         decomp_route_prompt = self.DECOMP_ROUTE_PROMPT.format(query=query)
         decomp_max_tokens = self.cfg.get("decomposition_max_tokens", 2048)
@@ -461,10 +510,15 @@ class LLMMultiRoundRouter(MetaRouter):
                 request["service"] = service
             try:
                 result = call_api(request, max_tokens=decomp_max_tokens, temperature=0.0)
+                failure = _api_failure(result)
+                if failure is not None:
+                    return failure
                 decomp_output = result.get("response", "")
             except Exception as e:
-                print(f"Error in decomposition+routing: {e}")
-                decomp_output = ""
+                return {
+                    "response": "", "success": False, "error": str(e),
+                    "model_name": self.base_model, "api_model_name": self.base_model,
+                }
         
         # Parse sub-queries and routes from output
         # Format: <sub-query>: <LLM name>
@@ -569,19 +623,27 @@ class LLMMultiRoundRouter(MetaRouter):
         
         try:
             result = call_api(request, max_tokens=512, temperature=0.000001)
-            return {
+            failure = _api_failure(result)
+            output = {
                 "response": result.get("response", ""),
                 "prompt_tokens": result.get("prompt_tokens", 0),
                 "completion_tokens": result.get("completion_tokens", 0),
-                "success": "error" not in result
+                "success": failure is None,
+                "model_name": model_name,
+                "api_model_name": api_model_name,
             }
+            if failure is not None:
+                output["error"] = failure["error"]
+            return output
         except Exception as e:
-            print(f"Error executing sub-query with {model_name}: {e}")
             return {
                 "response": "",
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
-                "success": False
+                "success": False,
+                "error": str(e),
+                "model_name": model_name,
+                "api_model_name": api_model_name,
             }
     
     def _aggregate_responses(
@@ -590,7 +652,7 @@ class LLMMultiRoundRouter(MetaRouter):
         sub_queries: List[str], 
         sub_responses: List[Dict[str, Any]],
         task_name: Optional[str] = None
-    ) -> str:
+    ) -> Union[str, Dict[str, Any]]:
         """
         Aggregate sub-query responses into final answer.
         
@@ -601,7 +663,7 @@ class LLMMultiRoundRouter(MetaRouter):
             task_name: Optional task name for prompt selection
             
         Returns:
-            Final aggregated answer
+            Final aggregated answer, or a provider failure dict.
         """
         # Format auxiliary information
         input_info = ""
@@ -684,9 +746,14 @@ Format:
                 request["service"] = service
             try:
                 result = call_api(request, max_tokens=1024, temperature=0.0)
+                failure = _api_failure(result)
+                if failure is not None:
+                    return failure
                 final_answer = result.get("response", "")
             except Exception as e:
-                print(f"Error aggregating responses: {e}")
-                final_answer = ""
+                return {
+                    "response": "", "success": False, "error": str(e),
+                    "model_name": self.base_model, "api_model_name": self.base_model,
+                }
         
         return final_answer

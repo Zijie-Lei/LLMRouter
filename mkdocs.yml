@@ -1,0 +1,11 @@
+site_name: LLMRouter Engineering
+site_url: https://ulab-uiuc.github.io/LLMRouter/
+repo_url: https://github.com/ulab-uiuc/LLMRouter
+docs_dir: docs
+theme:
+  name: material
+nav:
+  - Overview: index.md
+  - Engineering roadmap: production-readiness.md
+  - Verification and independent review: verification.md
+  - Releases and repository setup: releases.md

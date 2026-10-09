@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.4.0"
 description = "A unified framework for LLM routing and evaluation."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 
 authors = [
   { name = "Tao Feng", email = "taofeng2@illinois.edu" },
@@ -42,7 +43,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
-  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
   "Operating System :: OS Independent",
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -56,6 +57,8 @@ classifiers = [
 "Bug Tracker" = "https://github.com/ulab-uiuc/LLMRouter/issues"
 
 [project.optional-dependencies]
+# Development dependencies for the offline unit test suites.
+test = ["pytest>=8.3,<9", "pytest-cov>=6,<7", "pytest-socket>=0.7,<1"]
 # RouterR1 requires vLLM (GPU only)
 router-r1 = ["vllm==0.6.3", "torch==2.4.0", "openai>=1.0"]
 # RouteFM is a frozen in-context router with a BGE text interface.
@@ -67,10 +70,37 @@ all = ["vllm==0.6.3", "torch==2.4.0", "openai>=1.0"]
 llmrouter = "llmrouter.cli.router_main:main"
 
 [tool.setuptools]
-# Enable including package data (YAML configs, JSON files, etc.)
-# For finer control, provide a MANIFEST.in file.
+# Include explicitly declared runtime resources in both wheels and source archives.
 include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["llmrouter*", "openclaw_router*"]
+
+[tool.setuptools.package-data]
+llmrouter = ["**/*.yaml", "**/*.yml"]
+openclaw_router = ["*.yaml", "*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "custom_routers/routefm_router/tests"]
+pythonpath = [".", "tests"]
+norecursedirs = ["train_test", "inference_test"]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--import-mode=importlib",
+  "--ignore=tests/test_websocket.py",
+  "-ra",
+]
+filterwarnings = ["error::pytest.PytestReturnNotNoneWarning"]
+
+[tool.coverage.run]
+omit = ["*/tests/*"]
+
+[tool.ruff]
+target-version = "py310"
+extend-exclude = ["site"]
+
+[tool.ruff.lint]
+# Start with errors that can break execution; expand style rules separately.
+select = ["E9", "F63", "F7", "F82"]

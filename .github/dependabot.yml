@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directories: ["/", "/requirements"]
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      development:
+        dependency-type: development
+        patterns: ["*"]
+      quality-tools:
+        patterns: [ruff, mkdocs-material]
+      build-tools:
+        patterns: [build, twine, setuptools, wheel]

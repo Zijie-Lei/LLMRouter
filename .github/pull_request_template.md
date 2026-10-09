@@ -58,6 +58,7 @@
 - [ ] I have reviewed my own code
 - [ ] I have added/updated documentation where necessary
 - [ ] I have added tests for my changes (if applicable)
+- [ ] My unit tests run offline without API keys, model downloads, or a GPU
 - [ ] My changes do not introduce new warnings or errors
 - [ ] Any dependent changes have been merged and published
 
@@ -66,10 +67,15 @@
 <!-- Describe how you tested your changes -->
 
 ```bash
-# Example commands used for testing
-llmrouter train --router ... --config ...
-llmrouter infer --router ... --config ... --query "..."
+# Include the exact commands and their results; see CONTRIBUTING.md for setup.
+python -m pytest --disable-socket --allow-unix-socket
+python -m ruff check .
 ```
+
+## Compatibility and rollout
+
+<!-- Describe any API/configuration changes, dependency or Python requirements,
+     release notes, and deployment steps. Explain rollback when behavior changes. -->
 
 ## Screenshots (if applicable)
 

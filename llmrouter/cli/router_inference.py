@@ -253,6 +253,7 @@ def route_query(
         if not model_name:
             return {
                 "success": False,
+                "query": query,
                 "error": "Router did not return a model name",
                 "routing_result": routing_result,
             }
@@ -298,11 +299,11 @@ def infer_query(
 
     # Check if router is a multi-round router (full pipeline in route_single)
     if router_name_lower in MULTI_ROUND_ROUTERS:
-        # Multi-round routers do full pipeline: decompose + route + execute + aggregate
-        # Their route_single returns response directly (string in chat mode, dict in eval mode)
+        # Evaluation mode keeps provider failure status from every pipeline
+        # stage; chat mode returns only text and cannot carry that status.
         try:
-            result = router_instance.route_single(query)
-            # route_single returns string for simple query, dict for evaluation mode
+            result = router_instance.route_single({"query": query})
+            # Preserve support for legacy routers that return response text.
             if isinstance(result, str):
                 return {
                     "success": True,
@@ -311,10 +312,9 @@ def infer_query(
                     "model_name": "multi-round-pipeline",
                     "method": "multi_round_router",
                 }
-            else:
-                # Dict result with response, tokens, etc.
-                return {
-                    "success": result.get("success", True),
+            elif isinstance(result, dict):
+                output = {
+                    "success": bool(result.get("success", True)) and "error" not in result,
                     "query": query,
                     "response": result.get("response", ""),
                     "model_name": "multi-round-pipeline",
@@ -322,6 +322,17 @@ def infer_query(
                     "completion_tokens": result.get("completion_tokens", 0),
                     "method": "multi_round_router",
                 }
+                if "error" in result:
+                    output["error"] = result["error"]
+                elif result.get("response") is None:
+                    output["success"] = False
+                    output["error"] = "Multi-round pipeline did not return a response"
+                elif not output["success"]:
+                    output["error"] = "Multi-round pipeline failed"
+                if not output["success"]:
+                    output["routing_result"] = result
+                return output
+            raise TypeError("Multi-round router must return a response string or dictionary")
         except Exception as e:
             import traceback
             return {
@@ -444,7 +455,7 @@ def infer_query(
 
         response = result.get("response", "No response generated")
 
-        return {
+        inference_result = {
             "success": True,
             "query": query,
             "model_name": model_name,
@@ -452,6 +463,15 @@ def infer_query(
             "response": response,
             "routing_result": routing_result,
         }
+        # call_api reports provider failures as result dictionaries instead of
+        # raising. Keep that error and the route identity for CLI consumers.
+        if "error" in result:
+            inference_result["success"] = False
+            inference_result["error"] = result["error"]
+        elif result.get("response") is None:
+            inference_result["success"] = False
+            inference_result["error"] = "API did not return a response"
+        return inference_result
 
     except Exception as e:
         import traceback
@@ -699,6 +719,9 @@ Examples:
         else:
             # Multiple queries: print as JSON array
             print(json.dumps(results, indent=2, ensure_ascii=False))
+
+    if any(not result["success"] for result in results):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
