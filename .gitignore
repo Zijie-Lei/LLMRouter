@@ -28,6 +28,7 @@ env/
 
 # Test reports
 .pytest_cache/
+.ruff_cache/
 .coverage
 .coverage.*
 coverage/

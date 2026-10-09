@@ -3,15 +3,22 @@
 ## Automated checks
 
 The `CI` workflow runs for every pull request targeting `main`, every push to
-`main`, and manual dispatches. It runs the offline unit suites on Python 3.10
-and 3.12 with CPU PyTorch, then builds and validates the package and checks the
-installed CLI entry point. Test results and coverage reports are available as
-workflow artifacts.
+`main`, and merge-queue groups. It also supplies release
+validation. It runs the offline unit suites on Python 3.10, 3.11, and 3.12 with CPU
+PyTorch, checks Python correctness and workflow syntax, builds engineering docs
+strictly, and reviews PR dependencies for introduced high/critical advisories.
+It builds the wheel from the source distribution, then verifies an isolated
+installation's version, entry point, and every bundled YAML resource outside
+the checkout. Test reports, coverage, distributions, and built docs are artifacts.
 
-The final check is named **`CI`**. It passes only when both Python test jobs
-and the package build succeed. Keep this name stable when configuring required
-checks. The workflow has no path filters, so documentation-only PRs also get
-the required check.
+The final check is named **`CI`**. It passes only when every applicable job
+succeeds. Dependency review is required for PR events and intentionally skips
+other events. Keep this name stable when configuring required checks. The
+workflow has no path filters, so documentation-only PRs also get the required
+check. CodeQL runs separately and should be triaged before becoming required.
+
+Every job checks out the triggering commit (or the resolved release SHA).
+Use GitHub's **Re-run jobs** on a PR run to retain its dependency-review gate.
 
 GitHub must also have a branch rule requiring `CI` before it can block merges.
 The intended rule for `main` requires an up-to-date branch, one approving
@@ -22,7 +29,7 @@ Activate it after the new workflow has produced a successful `CI` check.
 
 ## Run the same tests locally
 
-Use Python 3.10 or 3.12 in a virtual environment:
+Use Python 3.10, 3.11, or 3.12 in a virtual environment:
 
 ```bash
 python -m venv .venv
@@ -61,10 +68,50 @@ or a GPU.
 ## Validate a distribution
 
 ```bash
-python -m pip install "build>=1,<2" "twine>=6,<7"
-python -m build
+python -m pip install -r requirements/build.txt
+python -m build --no-isolation
 python -m twine check --strict dist/*
 ```
+
+Verify the installed package in a separate environment, away from the checkout:
+
+```bash
+project_dir="$PWD"
+smoke_dir="$(mktemp -d /tmp/llmrouter-wheel-smoke.XXXXXX)"
+python -m venv "$smoke_dir"
+"$smoke_dir/bin/python" -m pip install --no-deps dist/*.whl
+cd /tmp
+"$smoke_dir/bin/python" -I "$project_dir/scripts/check_distribution.py" \
+  --wheel "$project_dir"/dist/*.whl
+cd "$project_dir"
+```
+
+Use a fresh smoke environment to prevent an editable installation from masking
+packaging problems. `python -m build` builds the wheel from the sdist by default.
+CI disables build isolation after installing the pinned backend and build tools,
+so release validation uses those exact versions. Dependabot maintains the pins.
+
+## Code, workflows, and docs
+
+```bash
+python -m pip install -r requirements/quality.txt
+python -m ruff check .
+actionlint
+python -m mkdocs build --strict
+```
+
+Install actionlint 1.7.12 from its upstream release. CI checks the downloaded
+binary's SHA-256. Ruff currently checks syntax errors, undefined names, invalid
+comparisons, and invalid control flow across the repository; style cleanup is
+separate work. Engineering docs are retained as the `engineering-docs` artifact.
+The public website and its Pages workflow are maintained on `website`.
+
+## Releases and security
+
+See [the release and repository setup guide](docs/releases.md) for tag validation,
+dry runs, protected PyPI publishing, and required GitHub settings. Publication
+defaults to disabled and uses OIDC after the `pypi` environment is approved.
+See [SECURITY.md](SECURITY.md) for private reporting and the current support policy.
 
 ## Submit a change
 
