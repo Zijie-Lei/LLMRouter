@@ -165,22 +165,28 @@ def test_unified_processing_keeps_unmatched_routing_rows_without_fabricating_emb
 @pytest.mark.xfail(strict=True, raises=ValueError, reason="Existing defect: missing embedding IDs serialize as NaN, which is not valid JSON, instead of null")
 def test_missing_embedding_ids_are_written_as_valid_json_null(tmp_path, monkeypatch, failure_mode):
     def encode(text):
-        if failure_mode == "encoder_failure":
+        if failure_mode == "encoder_failure" and text == "broken":
             raise RuntimeError("encoder unavailable")
         return [1.0]
 
     monkeypatch.setattr(embeddings, "get_longformer_embedding", encode)
     query = {"task_name": "task", "query": "known", "ground_truth": "answer", "metric": "em"}
-    frame = pd.DataFrame([{**query, "query": "unknown" if failure_mode == "unmatched_query" else "known"}])
+    missing = {**query, "query": "unknown" if failure_mode == "unmatched_query" else "broken"}
+    # Include a valid ID so the missing value has the same numeric-column
+    # representation on pandas 2.x (Python 3.10) and pandas 3.x.
+    frame = pd.DataFrame([query, missing])
+    queries = [query, missing] if failure_mode == "encoder_failure" else [query]
     data_processing.process_unified_embeddings_and_routing(
-        frame, frame.iloc[:0], [query], [],
+        frame, frame.iloc[:0], queries, [],
         str(tmp_path / "vectors.pt"), str(tmp_path / "train.jsonl"), str(tmp_path / "test.jsonl"),
     )
 
     def reject_non_json_constant(value):
         raise ValueError(f"Invalid JSON constant: {value}")
 
-    record = json.loads((tmp_path / "train.jsonl").read_text(), parse_constant=reject_non_json_constant)
+    lines = (tmp_path / "train.jsonl").read_text().splitlines()
+    assert json.loads(lines[0])["embedding_id"] == 0
+    record = json.loads(lines[1], parse_constant=reject_non_json_constant)
     assert record["embedding_id"] is None
 
 
