@@ -1,14 +1,14 @@
 # Verification and independent review
 
-This records local verification on October 9, 2026 for the
-`codex/pr-ci-guardrails` workstream. Hosted GitHub checks and publication still
-need to be exercised after the workflows land.
+This records local and hosted verification on October 9, 2026 for the
+`codex/pr-ci-guardrails` workstream. Release environment approval and publication
+remain untested.
 
 ## Local results
 
 | Check | Result |
 | --- | --- |
-| Offline core suite, with sockets disabled | 415 passed; 2 CUDA-only tests skipped; 10 strict expected failures |
+| Offline core suite, with sockets disabled | 615 passed; 2 CUDA-only tests skipped; 22 strict expected failures |
 | Offline FusionGate suite, separate process | 54 passed |
 | Python correctness checks | Ruff passed |
 | Workflow syntax | actionlint 1.7.12 passed; local ShellCheck integration disabled because ShellCheck was unavailable |
@@ -19,13 +19,40 @@ need to be exercised after the workflows land.
 | Aggregate CI gate | Nine success, failure, cancellation, and skipped-job scenarios behaved as expected |
 | Release guard | Seven scenarios covered valid tags, missing tags, version mismatch, off-main ancestry, and rejected version/tag formats |
 
-The test runs used macOS and Python 3.12. The configured Linux matrix covers
-Python 3.10, 3.11, and 3.12; these changes have not yet run in hosted CI.
+The local test runs used macOS and Python 3.12. The Linux matrix also passed on
+Python 3.10, 3.11, and 3.12 in the fork's first hosted PR run.
 CPU tests do not establish GPU compatibility. Earlier runs also confirmed that
 the socket guard blocked a dependency's import-time network attempt. The final
-core run reported an existing Starlette dependency deprecation warning.
-Dependency review, CodeQL uploads, environment approval, and trusted publishing
-require hosted verification.
+core run reported existing Starlette and scikit-learn deprecation warnings.
+Release environment approval and trusted publishing require separate hosted
+verification.
+
+## Hosted PR verification
+
+[PR #1 in the fork](https://github.com/Zijie-Lei/LLMRouter/pull/1) exercised CI
+before the workflows were merged into `main`.
+The [CI run](https://github.com/Zijie-Lei/LLMRouter/actions/runs/37999927763) and
+[CodeQL run](https://github.com/Zijie-Lei/LLMRouter/actions/runs/37999927746) passed.
+Each Python version passed 415 core tests and 54 FusionGate tests, with two
+CUDA skips and ten expected failures. Core line coverage was 38.94% on Python
+3.10 and 38.93% on Python 3.11/3.12. JUnit, coverage, documentation, and
+distribution artifacts were downloaded successfully.
+
+The fork initially had dependency graph disabled. Dependency review passed
+after enabling the graph and rerunning the failed jobs. Hosted actionlint also
+passed with Ubuntu's ShellCheck integration, and CodeQL uploaded its results.
+Dependency review checks introduced dependency changes; existing Dependabot
+vulnerability alerts on inherited `main` remain a separate backlog.
+
+[PR #2](https://github.com/Zijie-Lei/LLMRouter/pull/2) is a separate deliberate
+failure demo and must not be merged. Its
+[run](https://github.com/Zijie-Lei/LLMRouter/actions/runs/38000223735) reported
+exactly one intentional test failure in each Python version, and the aggregate
+`CI` check failed. Other checks passed and failed-run test artifacts were
+available. The deliberate test is absent from `codex/pr-ci-guardrails`.
+
+The fork's `main` remains unchanged. Requiring passing checks before merging
+still needs an active branch rule or ruleset.
 
 ## Incremental coverage expansion
 
@@ -90,6 +117,66 @@ now omits API keys so parsing first would raise the wrong exception. The revised
 test passes. A broader Claude pass timed out and is not counted as a completed
 review of all nine files.
 
+## Second incremental coverage pass
+
+Seven additional test files increase core line coverage from **38.9% to 48.9%**,
+from 5,562 to 6,980 covered lines out of the same 14,282. The core suite adds
+**200 passing cases and 12 strict expected failures**, reaching 615 passing
+tests, two CUDA skips, and 22 expected failures. The full local offline run
+completed in 21.79 seconds on Python 3.12.
+Product code, dependencies, and workflow configuration are unchanged.
+
+| Existing module | Before this pass | After this pass |
+| --- | --- | --- |
+| Dataset conversion | 0% | 99.7% |
+| Embedding/routing data processing | 10.3% | 99.3% |
+| Multi-turn / arena conversation utilities | 5.4% / 5.2% | 100% / 95.8% |
+| Hybrid router / trainer | 10.8% / 29.2% | 93.0% / 91.7% |
+| Elo router / trainer | 11.7% / 24.0% | 92.2% / 100% |
+| Threshold router / trainer | 19.1% / 11.9% | 95.6% / 82.1% |
+| TaskAware router | 21.1% | 100% |
+| OpenClaw memory / media | 14.8% / 11.2% | 98.9% / 75.3% |
+
+The tests exercise real JSONL/tensor persistence and row alignment, answer and
+model-cost schemas, known-answer conversation scoring, tiny-data sklearn
+training and checkpoint reload, actual neural decision boundaries, memory
+pooling/filtering/ranking, media parsing, HTTP request serialization, and
+temporary-file cleanup. A controlled completion scheduler forces embedding
+tasks out of order; real-thread cases also run. Encoder downloads and external
+providers are replaced at their boundaries.
+
+The twelve new expected failures record existing defects:
+
+- Two converter modes include an end line documented as exclusive.
+- LLM conversion without an API key drops records rather than using its
+  announced fallback.
+- Failed or unmatched embedding IDs serialize as the non-JSON constant `NaN`
+  instead of `null` (two cases).
+- Non-object JSONL entries crash memory reload (two cases).
+- Standard nested OpenAI `input_audio` data is ignored.
+- Threshold training cannot consume its loaded DataFrame, and after supplying
+  a record sequence to isolate that defect, a real training epoch fails at
+  checkpoint saving because the trainer has not retained its configuration.
+- TaskAware routing misses fallback handling for a wrong-type JSON judgment
+  and for a direct timeout (two cases).
+
+These remain explicitly unfixed in the test-only pass. Executed-line coverage
+includes their failing paths; it does not mean these behaviors pass. GPU and
+downloaded-model paths, several router families, generation/evaluation scripts,
+and other CLI paths still need coverage. No exclusions or coverage thresholds
+were changed.
+
+Two Codex workers authored the memory/media and policy/Elo tests in the shared
+workspace. The parent reviewed those files and ran the complete suite; one
+worker also reviewed the data/conversation tests. Claude Opus 5.5 independently
+reviewed the initial data-processing and conversation tests, returning
+**APPROVE-WITH-NITS** with no blockers. Review findings led to forced completion
+ordering, assertions on successful persisted embedding IDs, independently
+copied nested DataFrame values, exact model-ID suffixes, and a provider result
+that differs from the direct fallback with explicit call-count checks. The
+revised tests pass in the full suite. Claude did not review all seven files or
+execute the tests, and two helper source files were outside its supplied scope.
+
 ## Review panel
 
 Claude, Codex, and Muse Code reviewed code in the same workspace independently.
@@ -135,6 +222,7 @@ zero failure scores for all ground-truth aliases (including the value `0`).
   its negative check against the old wheel exercise the packaging boundary.
   No mock-only test of the checker was added.
 
-The corrected findings are locally verified. The next gates are the hosted runs
-and [repository setup](releases.md), followed by the behavioral and operational
+The corrected findings are locally verified and the PR checks have also run
+successfully in the fork. Remaining gates include [repository setup](releases.md)
+and release verification, followed by the behavioral and operational
 work in the [engineering roadmap](production-readiness.md).
