@@ -12,6 +12,8 @@ existing routing and embedding behavior:
   independent neural model forwards can overlap.
 - Each adapter serializes calls to its mutable underlying router. HTTP routing
   returns a deep copy of that request's diagnostics with its selected model.
+  Noncopyable diagnostic metadata produces a logging placeholder while the
+  successful route continues.
 - Blocking routing, memory retrieval, and memory recording run in Starlette's
   existing bounded worker pool so the event loop can serve other requests.
 - Concurrent Responses API requests for the same identity, advertised model,
@@ -23,26 +25,33 @@ existing routing and embedding behavior:
 
 | Local check | Result |
 | --- | --- |
-| Offline core suite, sockets disabled, Python 3.12 | 716 passed; 2 CUDA skips; 17 strict expected failures |
+| Offline core suite, sockets disabled, Python 3.12 | 718 passed; 2 CUDA skips; 17 strict expected failures |
 | Offline FusionGate suite, separate process | 54 passed |
-| Core executed-line coverage | 54.79% (7,870 / 14,363 lines) |
+| Core executed-line coverage | 49.86% (7,164 / 14,367 lines) |
 | Python correctness and changed-file whitespace | Ruff and `git diff --check` passed |
 
-The 38 new passing cases use bounded event gates to force contention, failures,
+The 40 new passing cases use bounded event gates to force contention, failures,
 and cancellation. They exercise real local tokenizers and Torch computations,
 real HTTP/WebSocket handlers, and actual JSONL append/reload. Downloads and
 external routing/backend calls are replaced at their boundaries. Tests check
 health responses before blocked workers are released, nested diagnostics for
 each query, cache isolation and waiter cleanup, embedding values, and memory
-retrieval after reload. Coverage measures executed lines, including import
+retrieval after reload. Longformer tests use a real local fast tokenizer;
+OpenClaw memory tests use a tokenizer stub and real Torch inference. Its
+offloading tests invoke the real router through a small test ASGI controller;
+the cache tests invoke the production Responses API with routing choice replaced
+at that boundary. Coverage measures executed lines, including import
 paths; it does not establish complete behavioral coverage.
 
 Three independent reviewers cross-checked the production changes and
 regressions read-only in the shared workspace and approved the revisions.
 Review findings led to bounded test lock acquisition, an explicit check that
 blocked appends leave live metadata unpublished, a direct mutable-router
-serialization test, and cancellation/eligibility cache regressions. The PR
-records the separate Claude review and final hosted checks.
+serialization test, and cancellation/eligibility cache regressions. Claude Opus
+5.5 independently approved the supplied code read-only and executed no tests.
+Its diagnostic-copy finding led to the logging placeholder and normal passing
+regressions in both strict and permissive routing modes. The PR records its
+follow-up review and final hosted checks.
 
 These locks are process-local, and adapter/memory locks belong to each instance.
 This work does not establish GPU compatibility, fix distributed access, prove

@@ -199,3 +199,31 @@ def test_parallel_http_responses_and_nested_diagnostics_stay_with_their_queries(
     output = capsys.readouterr().out
     for query in ("first", "second"):
         assert f"Query: '{query}...' -> {query} reason=reason-{query} signals={{'request': {{'query': '{query}'}}}}" in output
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_noncopyable_diagnostics_do_not_fail_successful_routing(serving, capsys, strict):
+    serving.adapter.fail_on_error = strict
+    original = serving.route
+
+    def noncopyable(query):
+        return {"model_name": query, "routing_signals": {"guard": threading.Lock()}}
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=serving.app), base_url="http://app.test") as client:
+            serving.route = noncopyable
+            first = await asyncio.wait_for(client.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "first"}],
+            }), 5)
+            assert first.status_code == 200 and first.json()["model"] == "first"
+            assert first.json()["choices"][0]["message"]["content"] == "first"
+            serving.route = original
+            second = await asyncio.wait_for(client.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "second"}],
+            }), 5)
+            assert second.status_code == 200 and second.json()["model"] == "second"
+
+    asyncio.run(exercise())
+    output = capsys.readouterr().out
+    assert "-> first reason=routing diagnostics unavailable: TypeError" in output
+    assert "-> second reason=reason-second signals={'request': {'query': 'second'}}" in output

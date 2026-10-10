@@ -114,7 +114,13 @@ class RouterAdapter:
         """Return model and diagnostics from the same serialized routing call."""
         with self._route_lock:
             selected_model = self.route(query, available_models)
-            return selected_model, deepcopy(self.last_router_info or {})
+            try:
+                info = deepcopy(self.last_router_info or {})
+            except Exception as exc:
+                # Optional logging metadata must not fail a successful route.
+                # Avoid retaining shallow mutable values from another request.
+                info = {"routing_reason": f"routing diagnostics unavailable: {type(exc).__name__}"}
+            return selected_model, info
 
     def _route_unlocked(self, query: str, available_models: List[str]) -> str:
         if self.router is None:
