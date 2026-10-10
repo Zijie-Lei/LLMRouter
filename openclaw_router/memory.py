@@ -204,7 +204,7 @@ class MemoryBank:
                         continue
                     with np.errstate(over="ignore", invalid="ignore"):
                         norm = float(np.linalg.norm(emb))
-                    if norm == 0 or not np.isfinite(norm):
+                    if norm <= 1e-12 or not np.isfinite(norm):
                         continue
                     emb = _normalize(emb)
 

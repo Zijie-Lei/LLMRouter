@@ -218,7 +218,11 @@ def test_missing_metadata_is_null_in_both_splits_without_changing_valid_values(t
     assert list(vectors) == [0]
 
 
-@pytest.mark.parametrize("bad_value, error", [(float("inf"), ValueError), (float("-inf"), ValueError), ({"nested": float("inf")}, ValueError), ({"unsupported"}, TypeError)])
+@pytest.mark.parametrize("bad_value, error", [
+    (float("inf"), ValueError), (float("-inf"), ValueError),
+    ({"nested": float("inf")}, ValueError), ({"unsupported"}, TypeError),
+    pytest.param({"text": "\ud800"}, UnicodeEncodeError, id="invalid-utf8"),
+])
 @pytest.mark.parametrize("bad_split", ["train", "test"])
 def test_invalid_json_output_raises_before_replacing_existing_files(tmp_path, monkeypatch, capsys, bad_value, error, bad_split):
     monkeypatch.setattr(embeddings, "get_longformer_embedding", lambda text: [1.0])
@@ -229,7 +233,7 @@ def test_invalid_json_output_raises_before_replacing_existing_files(tmp_path, mo
     for path in paths:
         path.write_bytes(b"previous output")
 
-    with pytest.raises(error, match="Out of range float|not JSON serializable"):
+    with pytest.raises(error, match="Out of range float|not JSON serializable|surrogates not allowed"):
         data_processing.process_unified_embeddings_and_routing(
             invalid if bad_split == "train" else frame,
             invalid if bad_split == "test" else frame,

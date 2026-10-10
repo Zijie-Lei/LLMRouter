@@ -287,8 +287,8 @@ def convert_data(
     
     if use_llm:
         print(f"Using LLM API to generate missing fields (using {max_workers} parallel workers)...")
-        # Use API key
-        api_key = API_KEYS if API_KEYS and API_KEYS.strip() else None
+        # Ignore the shipped placeholder, preserving configured keys verbatim.
+        api_key = API_KEYS if API_KEYS and API_KEYS.strip() not in ("", "your_api_key") else None
         
         if not api_key:
             print("Warning: API key not found, will not use LLM to generate fields")

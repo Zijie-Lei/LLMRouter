@@ -209,7 +209,9 @@ def test_parallel_conversion_calls_provider_and_preserves_all_record_identities(
     assert all(call["api_key"] == api_key and call["api_base"] == "https://example.test/v1" for call in calls)
 
 
-@pytest.mark.parametrize("api_key", [None, "", " \t\n "], ids=["missing", "empty", "whitespace"])
+@pytest.mark.parametrize("api_key", [
+    None, "", " \t\n ", "your_api_key", " \tyour_api_key\n ",
+], ids=["missing", "empty", "whitespace", "placeholder", "padded-placeholder"])
 def test_parallel_conversion_without_key_falls_back_without_losing_records(converter, tmp_path, monkeypatch, capsys, api_key):
     source, output = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     rows = [
@@ -220,7 +222,7 @@ def test_parallel_conversion_without_key_falls_back_without_losing_records(conve
     write_jsonl(source, rows)
     monkeypatch.setattr(converter, "API_KEYS", api_key)
     # The converter's existing key source is the module setting, not the
-    # environment; a valid endpoint must not trigger calls with a blank key.
+    # environment; a valid endpoint must not trigger calls with an unusable key.
     monkeypatch.setenv("API_KEYS", "different-environment-key")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.test/v1")
     complete = Mock()
@@ -235,6 +237,34 @@ def test_parallel_conversion_without_key_falls_back_without_losing_records(conve
     assert [r["ability"] for r in records] == ["math-reasoning", "code-generation", "fact-reasoning"]
     assert [r["golden_answers"] for r in records] == [["4"], ["solution"], ["answer"]]
     assert [r["reward_model"]["ground_truth"]["target"] for r in records] == [["4"], ["solution"], ["answer"]]
+    complete.assert_not_called()
+    stdout = capsys.readouterr().out
+    assert "Warning: API key not found" in stdout
+    assert "Converting records directly (without using LLM)" in stdout
+
+
+@pytest.mark.parametrize("endpoint", [None, "https://example.test/v1"], ids=["no-endpoint", "configured-endpoint"])
+def test_cli_with_shipped_placeholder_retains_rows_without_provider_calls(converter, tmp_path, monkeypatch, capsys, endpoint):
+    source, output = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_jsonl(source, [
+        {"query": "math question", "ground_truth": 4, "task_name": "gsm8k"},
+        {"query": "code question", "ground_truth": "solution", "task_name": "mbpp"},
+    ])
+    # Exercise the shipped module setting, with no API_KEYS override.
+    assert converter.API_KEYS == "your_api_key"
+    if endpoint is not None:
+        monkeypatch.setenv("OPENAI_API_BASE", endpoint)
+    complete = Mock()
+    monkeypatch.setattr(converter, "completion", complete)
+    monkeypatch.setattr(sys, "argv", ["data-convert", "--input", str(source), "--output", str(output), "--use-llm"])
+
+    converter.main()
+
+    records = read_jsonl(output)
+    assert [r["question"] for r in records] == ["math question", "code question"]
+    assert [r["id"] for r in records] == ["gsm8k_0", "mbpp_1"]
+    assert [r["golden_answers"] for r in records] == [["4"], ["solution"]]
+    assert [r["ability"] for r in records] == ["math-reasoning", "code-generation"]
     complete.assert_not_called()
     stdout = capsys.readouterr().out
     assert "Warning: API key not found" in stdout

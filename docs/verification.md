@@ -6,26 +6,27 @@ The `conversion-memory-recovery` branch fixes three defects recorded by the
 coverage expansion: missing-key conversion drops rows, missing embedding IDs
 produce invalid JSON, and malformed saved history interrupts loading.
 
-The converter uses its existing direct fallback for absent, empty, or blank
-module API keys without calling a provider. Routing output replaces missing
-scalar and nested metadata values with JSON `null`; infinity and unsupported
-objects raise before any existing embedding or routing output is replaced.
+The converter uses its existing direct fallback for absent, empty, blank, or
+shipped placeholder module API keys without calling a provider. Routing output
+replaces missing scalar and nested metadata values with JSON `null`; infinity,
+unsupported objects, and invalid UTF-8 text raise before any existing embedding
+or routing output is replaced.
 This validation does not make the three filesystem writes atomic.
 
 History recovery skips invalid row shapes, fields, base64/float32 payloads,
-zero or overflowed vector norms, and JSON parser depth/integer-limit failures.
+zero, near-zero, or overflowed vector norms, and JSON parser depth/integer-limit failures.
 Actual-file regressions place corrupt records before and between valid records,
 verify retrieval and append/reload, and confirm loading leaves saved bytes
 unchanged. Existing unrecoverable text decoding behavior remains explicit.
 
 | Local check | Result |
 | --- | --- |
-| Offline core suite, sockets disabled, Python 3.12 | 668 passed; 2 CUDA skips; 17 strict expected failures |
+| Offline core suite, sockets disabled, Python 3.12 | 678 passed; 2 CUDA skips; 17 strict expected failures |
 | Offline FusionGate suite, separate process | 54 passed |
-| Core executed-line coverage | 48.96% (7,003 / 14,304 lines) |
+| Core executed-line coverage | 48.97% (7,006 / 14,307 lines) |
 | Python correctness and changed-file whitespace | Ruff and `git diff --check` passed |
 
-Five previously expected failures are normal passing regressions, with 48
+Five previously expected failures are normal passing regressions, with 58
 additional passing boundary cases. The other 17 known defects remain recorded
 as strict expected failures. Dependencies and workflow configuration are
 unchanged in this fix pass.
@@ -35,6 +36,12 @@ memory changes in the shared workspace. Findings led to parser depth/number
 guards, rejection of zero/overflowed vector norms before index dimension
 selection, and a recursion test that verifies the parser actually raises.
 Both reviewers approved the revised production changes and regressions.
+
+Claude Opus 5.5 independently reviewed the supplied source and regression tests
+read-only. Its initial **BLOCK** led to placeholder-key fallback, UTF-8 encoding
+preflight, near-zero vector rejection, and same-dimension vector regressions.
+Claude did not execute tests. See [PR #3](https://github.com/Zijie-Lei/LLMRouter/pull/3)
+for the follow-up review and final hosted checks.
 
 The fork now enforces its active `Require CI on main` ruleset with GitHub
 Actions' `CI` check and up-to-date branches. The deliberate failing PR #2 is

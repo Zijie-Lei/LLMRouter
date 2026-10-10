@@ -265,9 +265,13 @@ def process_unified_embeddings_and_routing(
         json.dumps(format_routing_record(row), ensure_ascii=False, allow_nan=False) + '\n'
         for _, row in df_test_final.iterrows()
     ]
+    # JSON can contain unpaired surrogates that a UTF-8 file cannot encode.
+    for lines in (train_lines, test_lines):
+        for line in lines:
+            line.encode('utf-8')
 
     for path in (embedding_output_path, routing_train_output_path, routing_test_output_path):
-        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(embedding_dict, embedding_output_path)
     print(f"✅ Saved {len(embedding_dict)} unified embeddings to {embedding_output_path}")
 

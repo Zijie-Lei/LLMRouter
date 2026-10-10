@@ -287,6 +287,10 @@ def encoded_vector(values):
     encoded_vector([float("-inf"), 0., 0.]),
     encoded_vector([0., 0.]),
     encoded_vector([3e38, 3e38]),
+    encoded_vector([0., 0., 0.]),
+    encoded_vector([3e38, 3e38, 3e38]),
+    encoded_vector([1e-20, 0.]),
+    encoded_vector([1e-20, 0., 0.]),
 ])
 def test_invalid_embeddings_do_not_poison_history_dimensions_or_ranking(tmp_path, local_encoder, payload):
     cfg = config_for(tmp_path)
