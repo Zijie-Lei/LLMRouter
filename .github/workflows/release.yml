@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vMAJOR.MINOR.PATCH tag on main
+        required: true
+        type: string
+      publish:
+        description: Publish validated distributions to PyPI (requires the pypi environment)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      ref: ${{ steps.tag.outputs.ref }}
+    steps:
+      - name: Require dispatch from main
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: test "$WORKFLOW_REF" = refs/heads/main
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Check tag ancestry and package version
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import tomllib
+
+          tag = os.environ["RELEASE_TAG"]
+          if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
+              raise SystemExit("Use an existing vMAJOR.MINOR.PATCH release tag")
+          ref = subprocess.check_output(
+              ["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"], text=True
+          ).strip()
+          subprocess.run(["git", "merge-base", "--is-ancestor", ref, "origin/main"], check=True)
+          metadata = tomllib.loads(subprocess.check_output(
+              ["git", "show", f"{ref}:pyproject.toml"], text=True
+          ))
+          if tag != "v" + metadata["project"]["version"]:
+              raise SystemExit("Release tag does not match pyproject.toml at that commit")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"ref={ref}\n")
+          PY
+
+  validate:
+    name: Validate release
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.guard.outputs.ref }}
+
+  publish:
+    name: Publish to PyPI
+    if: ${{ inputs.publish }}
+    needs: [guard, validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/llmrouter-lib/
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: distributions
+          path: dist
+      - name: Publish the distributions that passed validation
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist/
+          attestations: true

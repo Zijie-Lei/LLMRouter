@@ -287,8 +287,8 @@ def convert_data(
     
     if use_llm:
         print(f"Using LLM API to generate missing fields (using {max_workers} parallel workers)...")
-        # Use API key
-        api_key = API_KEYS if API_KEYS else None
+        # Ignore the shipped placeholder, preserving configured keys verbatim.
+        api_key = API_KEYS if API_KEYS and API_KEYS.strip() not in ("", "your_api_key") else None
         
         if not api_key:
             print("Warning: API key not found, will not use LLM to generate fields")
@@ -307,7 +307,7 @@ def convert_data(
                 for future in tqdm(as_completed(futures), total=len(futures), desc="Converting records"):
                     batch_results = future.result()
                     converted_records.extend(batch_results)
-    else:
+    if not use_llm:
         print("Converting records directly (without using LLM)...")
         for i, record in enumerate(tqdm(records, desc="Converting records")):
             try:
