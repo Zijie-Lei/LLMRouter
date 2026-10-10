@@ -1,5 +1,57 @@
 # Verification and independent review
 
+## Concurrency hardening (October 10, 2026)
+
+The `concurrency-hardening` branch continues from the tested
+`conversion-memory-recovery` commit `0fe5b7c`. It addresses reproduced races in
+existing routing and embedding behavior:
+
+- Longformer and Contriever initialization loads once per shared cache and
+  publishes the model after device setup and evaluation mode succeed. Failed
+  initialization remains retryable. Tokenizer configuration is guarded while
+  independent neural model forwards can overlap.
+- Each adapter serializes calls to its mutable underlying router. HTTP routing
+  returns a deep copy of that request's diagnostics with its selected model.
+- Blocking routing, memory retrieval, and memory recording run in Starlette's
+  existing bounded worker pool so the event loop can serve other requests.
+- Concurrent Responses API requests for the same identity, advertised model,
+  cache key, and query reuse one route. Waiters recheck context eligibility;
+  failure and cancellation release lock bookkeeping. Different keys can route
+  independently, and the existing 1,024-entry LRU limit remains enforced.
+- A memory bank keeps append order and live-index publication under the same
+  instance lock. An append error does not publish a live history record.
+
+| Local check | Result |
+| --- | --- |
+| Offline core suite, sockets disabled, Python 3.12 | 716 passed; 2 CUDA skips; 17 strict expected failures |
+| Offline FusionGate suite, separate process | 54 passed |
+| Core executed-line coverage | 54.79% (7,870 / 14,363 lines) |
+| Python correctness and changed-file whitespace | Ruff and `git diff --check` passed |
+
+The 38 new passing cases use bounded event gates to force contention, failures,
+and cancellation. They exercise real local tokenizers and Torch computations,
+real HTTP/WebSocket handlers, and actual JSONL append/reload. Downloads and
+external routing/backend calls are replaced at their boundaries. Tests check
+health responses before blocked workers are released, nested diagnostics for
+each query, cache isolation and waiter cleanup, embedding values, and memory
+retrieval after reload. Coverage measures executed lines, including import
+paths; it does not establish complete behavioral coverage.
+
+Three independent reviewers cross-checked the production changes and
+regressions read-only in the shared workspace and approved the revisions.
+Review findings led to bounded test lock acquisition, an explicit check that
+blocked appends leave live metadata unpublished, a direct mutable-router
+serialization test, and cancellation/eligibility cache regressions. The PR
+records the separate Claude review and final hosted checks.
+
+These locks are process-local, and adapter/memory locks belong to each instance.
+This work does not establish GPU compatibility, fix distributed access, prove
+or repair the reported batch memory leak, or benchmark throughput. Filesystem
+append/flush errors can still leave bytes on disk; there is no disk rollback or
+transaction guarantee. Dependencies, workflows, and the remaining 17 strict
+expected failures are unchanged. The PR depends on the still-open CI foundation
+and conversion/history fixes in fork PRs #1 and #3.
+
 ## Conversion and saved-history recovery (October 10, 2026)
 
 The `conversion-memory-recovery` branch fixes three defects recorded by the

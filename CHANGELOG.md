@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- Guard shared embedding initialization and tokenizer configuration, preserving
+  retry after failed setup and concurrent neural model forwards.
+- Serialize mutable router calls and keep concurrent request diagnostics with
+  their selected models while moving blocking work off server event loops.
+- Reuse one route for concurrent requests in the same Responses API turn, with
+  context eligibility checks and cancellation-safe waiter cleanup.
+- Keep saved-history append order consistent with live-index publication and
+  avoid publishing live records when append fails.
 - Use direct dataset conversion when LLM mode has no usable API key, preserving
   records through the existing fallback.
 - Write missing routing values as JSON `null` and validate JSON and UTF-8 in both

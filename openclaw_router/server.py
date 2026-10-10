@@ -10,6 +10,7 @@ Or directly:
     python server.py --config config.yaml
 """
 
+import asyncio
 import json
 import hashlib
 import os
@@ -1624,6 +1625,46 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
     # distinct user query in the same thread to be routed again.
     codex_route_cache: OrderedDict[Tuple[str, str, str, str], str] = OrderedDict()
     codex_route_cache_limit = 1024
+    route_cache_locks: Dict[Tuple[str, str, str, str], Tuple[asyncio.Lock, int]] = {}
+
+    async def _select_cached_model(cache_key, query, user, eligible_models):
+        cached_model = codex_route_cache.get(cache_key)
+        if cached_model in eligible_models:
+            codex_route_cache.move_to_end(cache_key)
+            print(f"[Router] Reusing Codex turn route -> {cached_model}")
+            return cached_model
+
+        lock, users = route_cache_locks.get(cache_key, (None, 0))
+        if lock is None:
+            lock = asyncio.Lock()
+        # Register before awaiting; all waiters must use the same lock.
+        route_cache_locks[cache_key] = (lock, users + 1)
+        try:
+            async with lock:
+                # Another request may have populated the cache while we waited.
+                cached_model = codex_route_cache.get(cache_key)
+                if cached_model in eligible_models:
+                    codex_route_cache.move_to_end(cache_key)
+                    print(f"[Router] Reusing Codex turn route -> {cached_model}")
+                    return cached_model
+
+                selected_model = await router.select_model(
+                    query, user=user, candidate_models=eligible_models,
+                )
+                codex_route_cache[cache_key] = selected_model
+                codex_route_cache.move_to_end(cache_key)
+                while len(codex_route_cache) > codex_route_cache_limit:
+                    codex_route_cache.popitem(last=False)
+                print(f"[Router] Codex query: '{query}' -> {selected_model}")
+                return selected_model
+        finally:
+            # Cancellation and failure also release bookkeeping. Keep the lock
+            # registered until its final waiter has left, preventing replacement.
+            _, users = route_cache_locks[cache_key]
+            if users == 1:
+                del route_cache_locks[cache_key]
+            else:
+                route_cache_locks[cache_key] = (lock, users - 1)
 
     @app.get("/health")
     async def health():
@@ -1714,32 +1755,20 @@ def create_app(config: OpenClawConfig = None, config_path: str = None) -> FastAP
             )
 
         if request.model == "auto" or request.model not in available_models:
-            selected_model = None
-            cache_key = None
             if codex_cache_context is not None:
                 identity, prompt_cache_key, advertised_model = codex_cache_context
                 query_digest = hashlib.sha256(user_query.encode("utf-8")).hexdigest()
                 cache_key = (identity, advertised_model, prompt_cache_key, query_digest)
-                cached_model = codex_route_cache.get(cache_key)
-                if cached_model in eligible_models:
-                    selected_model = cached_model
-                    codex_route_cache.move_to_end(cache_key)
-                    print(f"[Router] Reusing Codex turn route -> {selected_model}")
-
-            if selected_model is None:
+                selected_model = await _select_cached_model(
+                    cache_key, user_query, request.user, eligible_models,
+                )
+            else:
                 selected_model = await router.select_model(
                     user_query,
                     user=request.user,
                     candidate_models=eligible_models,
                 )
-                if cache_key is not None:
-                    codex_route_cache[cache_key] = selected_model
-                    codex_route_cache.move_to_end(cache_key)
-                    while len(codex_route_cache) > codex_route_cache_limit:
-                        codex_route_cache.popitem(last=False)
-                    print(f"[Router] Codex query: '{user_query}' -> {selected_model}")
-                else:
-                    print(f"[Router] Query: '{user_query}' -> {selected_model}")
+                print(f"[Router] Query: '{user_query}' -> {selected_model}")
         else:
             if request.model not in eligible_models:
                 context_limit = _configured_context_limit(config.llms[request.model])

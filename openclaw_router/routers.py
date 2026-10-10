@@ -11,9 +11,11 @@ import random
 import sys
 import io
 import contextlib
+import threading
 from typing import Any, Dict, List, Optional
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 
 # Handle both relative and direct imports
 try:
@@ -267,6 +269,7 @@ class LLMRouterAdapter:
         self.config_path = config_path
         self.model_path = model_path
         self.router = None
+        self._route_lock = threading.Lock()
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._load_router()
 
@@ -434,13 +437,14 @@ class LLMRouterAdapter:
             return random.choice(available_models)
 
         try:
-            result = self.router.route_single({"query": query})
+            with self._route_lock:
+                result = self.router.route_single({"query": query})
 
-            model_name = (
-                result.get("model_name")
-                or result.get("predicted_llm")
-                or result.get("predicted_llm_name")
-            )
+                model_name = (
+                    result.get("model_name")
+                    or result.get("predicted_llm")
+                    or result.get("predicted_llm_name")
+                )
 
             if model_name and model_name in available_models:
                 return model_name
@@ -534,7 +538,7 @@ class OpenClawRouter:
 
         if strategy == "llmrouter":
             if self._llmrouter_adapter:
-                selected = self._llmrouter_adapter.route(query, models)
+                selected = await run_in_threadpool(self._llmrouter_adapter.route, query, models)
                 _safe_log(
                     f"[Router] Strategy=llmrouter({self._llmrouter_adapter.router_name}) -> {selected}"
                 )
@@ -547,7 +551,8 @@ class OpenClawRouter:
             if self._memory_bank is not None:
                 try:
                     # Only use memory to augment the `llm` strategy for now.
-                    memory_items = self._memory_bank.retrieve(
+                    memory_items = await run_in_threadpool(
+                        self._memory_bank.retrieve,
                         query,
                         top_k=self.config.memory.top_k,
                         strategy_filter="llm",
@@ -558,7 +563,7 @@ class OpenClawRouter:
 
             selected = await select_by_llm(query, models, self.config, memory_items=memory_items)
             _safe_log(f"[Router] Strategy=llm -> {selected}")
-            self.record_route(query, selected, user=user)
+            await run_in_threadpool(self.record_route, query, selected, user=user)
             return selected
 
         _safe_log(f"[Router] Unknown strategy '{strategy}', using random")
