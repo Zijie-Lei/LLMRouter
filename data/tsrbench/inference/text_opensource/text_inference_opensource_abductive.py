@@ -22,7 +22,7 @@ import random
 parser = argparse.ArgumentParser(description="Run abductive reasoning tasks on basketball game data.")
 parser.add_argument("--model", type=str, default="gpt-4o", help="The model to use for generation (e.g., gpt-4o, gpt-4-turbo).")
 parser.add_argument("--workdir", type=str, default=".", help="Working directory to save results.")
-parser.add_argument("--dataset", type=str, required=True, help="Path to the input JSON dataset file.")
+parser.add_argument("--dataset", type=str, required=True, help="Path to the input JSONL dataset file.")
 parser.add_argument("--num_workers", type=int, default=8, help="Number of parallel processes to run (reduced from 16 for rate limiting).")
 parser.add_argument("--openai-api-key", type=str, required=True, help="OpenAI API key")
 parser.add_argument("--openai-base-url", type=str, default=None, help="OpenAI Base URL (optional)")
@@ -211,7 +211,7 @@ if __name__ == '__main__':
     output_file_path = os.path.join(exp_path, "generated_answer.json")
 
     # --- 3. 读取数据集并处理 ---
-    dataset = read_json_file(args.dataset)
+    dataset = read_jsonl_file(args.dataset)
     if not dataset:
         sys.exit(1) # 如果数据集为空或读取失败则退出
 

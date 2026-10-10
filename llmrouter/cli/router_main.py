@@ -135,6 +135,11 @@ def infer_command(args):
         else:
             print(json.dumps(results, indent=2, ensure_ascii=False))
 
+    # Write every result before signaling failure so batch callers can inspect
+    # both successful queries and errors without mistaking the run for success.
+    if any(not result["success"] for result in results):
+        sys.exit(1)
+
 
 def chat_command(args):
     """Execute the chat subcommand."""

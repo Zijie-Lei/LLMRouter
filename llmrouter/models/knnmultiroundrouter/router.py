@@ -1,10 +1,21 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import os
 import torch.nn as nn
 import copy
 from sklearn.neighbors import KNeighborsClassifier
 from llmrouter.models.meta_router import MetaRouter
 from llmrouter.utils import load_model, get_longformer_embedding, call_api, generate_task_query, calculate_task_performance
+
+
+def _api_failure(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Keep provider failure metadata separate from response text."""
+    if "error" in result:
+        error = result["error"]
+    elif result.get("response") is None:
+        error = "API did not return a response"
+    else:
+        return None
+    return {**result, "success": False, "error": error}
 
 # Optional imports for local LLM inference
 try:
@@ -200,21 +211,59 @@ class KNNMultiRoundRouter(MetaRouter):
             chat_mode = False
             query_dict = query
         
-        # Step 1: Decompose query into sub-queries
-        sub_queries = self._decompose_query(original_query)
-        
-        # Step 2: Route and execute each sub-query
         sub_responses = []
-        for sub_query in sub_queries:
-            # Route the sub-query using KNN
-            model_name = self._route_sub_query(sub_query)
-            
-            # Execute the sub-query with the routed model
-            execution_result = self._execute_sub_query(sub_query, model_name)
-            sub_responses.append(execution_result)
-        
-        # Step 3: Aggregate responses into final answer
-        final_answer = self._aggregate_responses(original_query, sub_queries, sub_responses, task_name)
+
+        def failed(result, stage):
+            output = copy.copy(query_dict)
+            output.update({
+                "response": result.get("response", ""),
+                "success": False,
+                "error": result.get("error", f"{stage} failed"),
+                "failure_stage": stage,
+                "prompt_tokens": sum(r.get("prompt_tokens", 0) for r in sub_responses),
+                "completion_tokens": sum(r.get("completion_tokens", 0) for r in sub_responses),
+            })
+            output["input_token"] = output["prompt_tokens"]
+            output["output_token"] = output["completion_tokens"]
+            for key in ("model_name", "api_model_name"):
+                if key in result:
+                    output[key] = result[key]
+            if "api_name" in result:
+                output["api_model_name"] = result["api_name"]
+            if any(key in query_dict for key in ("ground_truth", "gt", "answer")):
+                output["task_performance"] = 0.0
+            return (output["response"] or f"Error: {output['error']}") if chat_mode else output
+
+        stage = "decomposition"
+        model_name = None
+        try:
+            sub_queries = self._decompose_query(original_query)
+
+            for sub_query in sub_queries:
+                stage = "routing"
+                model_name = self._route_sub_query(sub_query)
+                stage = "execution"
+                execution_result = self._execute_sub_query(sub_query, model_name)
+                sub_responses.append(execution_result)
+                if not execution_result.get("success", False):
+                    return failed(execution_result, stage)
+
+            stage = "aggregation"
+            final_answer = self._aggregate_responses(original_query, sub_queries, sub_responses, task_name)
+            if isinstance(final_answer, dict):
+                return failed(final_answer, stage)
+        except Exception as error:
+            result = {"response": "", "error": str(error)}
+            failed_model = None
+            if stage in {"decomposition", "aggregation"}:
+                failed_model = self.base_model
+            elif stage == "execution":
+                failed_model = model_name
+            if failed_model is not None:
+                result["model_name"] = failed_model
+                metadata = getattr(self, "llm_data", None) or {}
+                result["api_model_name"] = metadata.get(failed_model, {}).get("model", failed_model)
+            return failed(result, stage)
 
         # Chat mode: return response string only
         if chat_mode:
@@ -462,19 +511,27 @@ class KNNMultiRoundRouter(MetaRouter):
         
         try:
             result = call_api(request, max_tokens=512, temperature=0.000001)
-            return {
+            failure = _api_failure(result)
+            output = {
                 "response": result.get("response", ""),
                 "prompt_tokens": result.get("prompt_tokens", 0),
                 "completion_tokens": result.get("completion_tokens", 0),
-                "success": "error" not in result
+                "success": failure is None,
+                "model_name": model_name,
+                "api_model_name": api_model_name,
             }
+            if failure is not None:
+                output["error"] = failure["error"]
+            return output
         except Exception as e:
-            print(f"Error executing sub-query with {model_name}: {e}")
             return {
                 "response": "",
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
-                "success": False
+                "success": False,
+                "error": str(e),
+                "model_name": model_name,
+                "api_model_name": api_model_name,
             }
     
     def _aggregate_responses(
@@ -483,7 +540,7 @@ class KNNMultiRoundRouter(MetaRouter):
         sub_queries: List[str], 
         sub_responses: List[Dict[str, Any]],
         task_name: Optional[str] = None
-    ) -> str:
+    ) -> Union[str, Dict[str, Any]]:
         """
         Aggregate sub-query responses into final answer.
         
@@ -494,7 +551,7 @@ class KNNMultiRoundRouter(MetaRouter):
             task_name: Optional task name for prompt selection
             
         Returns:
-            Final aggregated answer
+            Final aggregated answer, or a provider failure dict.
         """
         # Format auxiliary information
         input_info = ""
@@ -577,9 +634,14 @@ Format:
                 request["service"] = service
             try:
                 result = call_api(request, max_tokens=1024, temperature=0.0)
+                failure = _api_failure(result)
+                if failure is not None:
+                    return failure
                 final_answer = result.get("response", "")
             except Exception as e:
-                print(f"Error aggregating responses: {e}")
-                final_answer = ""
+                return {
+                    "response": "", "success": False, "error": str(e),
+                    "model_name": self.base_model, "api_model_name": self.base_model,
+                }
         
         return final_answer

@@ -43,7 +43,7 @@ def _encode_f32_b64(vec: np.ndarray) -> str:
 
 
 def _decode_f32_b64(b64: str) -> np.ndarray:
-    raw = base64.b64decode(b64.encode("ascii"))
+    raw = base64.b64decode(b64.encode("ascii"), validate=True)
     return np.frombuffer(raw, dtype=np.float32)
 
 
@@ -69,21 +69,31 @@ class ContrieverEmbedder:
         self._model = None
         self._torch = None
         self._device = None
+        self._load_lock = threading.Lock()
+        self._tokenizer_lock = threading.Lock()
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
 
-        import torch
-        from transformers import AutoModel, AutoTokenizer
+        with self._load_lock:
+            if self._model is not None:
+                return
 
-        self._torch = torch
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self._model = AutoModel.from_pretrained(self.model_name)
+            import torch
+            from transformers import AutoModel, AutoTokenizer
 
-        self._device = torch.device(self.device)
-        self._model.to(self._device)
-        self._model.eval()
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            model = AutoModel.from_pretrained(self.model_name)
+            device = torch.device(self.device)
+            model.to(device)
+            model.eval()
+
+            # Publish the ready model last; failed initialization remains retryable.
+            self._torch = torch
+            self._tokenizer = tokenizer
+            self._device = device
+            self._model = model
 
     def embed(self, texts: List[str]) -> np.ndarray:
         self._ensure_loaded()
@@ -91,14 +101,16 @@ class ContrieverEmbedder:
         torch = self._torch
         assert torch is not None
 
-        # Tokenize
-        inputs = self._tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+        # Fast tokenizers mutate backend padding/truncation settings on each call.
+        # Serialize tokenization, while allowing independent model forwards.
+        with self._tokenizer_lock:
+            inputs = self._tokenizer(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            )
         inputs = {k: v.to(self._device) for k, v in inputs.items()}
 
         with torch.no_grad():
@@ -177,20 +189,36 @@ class MemoryBank:
                         continue
                     try:
                         obj = json.loads(line)
-                    except Exception:
+                    except (ValueError, RecursionError):
                         continue
 
-                    query = (obj.get("query") or "").strip()
-                    model = (obj.get("model") or "").strip()
+                    if not isinstance(obj, dict):
+                        continue
+
+                    query = obj.get("query")
+                    model = obj.get("model")
                     emb_b64 = obj.get("emb_b64")
+                    if not all(isinstance(value, str) for value in (query, model, emb_b64)):
+                        continue
+                    if any(obj.get(key) is not None and not isinstance(obj[key], str) for key in ("ts", "strategy", "user")):
+                        continue
+
+                    query = query.strip()
+                    model = model.strip()
                     if not query or not model or not emb_b64:
                         continue
 
                     try:
-                        emb = _decode_f32_b64(str(emb_b64))
-                        emb = _normalize(emb)
-                    except Exception:
+                        emb = _decode_f32_b64(emb_b64)
+                    except ValueError:
                         continue
+                    if emb.size == 0 or not np.isfinite(emb).all():
+                        continue
+                    with np.errstate(over="ignore", invalid="ignore"):
+                        norm = float(np.linalg.norm(emb))
+                    if norm <= 1e-12 or not np.isfinite(norm):
+                        continue
+                    emb = _normalize(emb)
 
                     if expected_dim is None:
                         expected_dim = int(emb.shape[0])
@@ -255,13 +283,15 @@ class MemoryBank:
                 # Different embedding dimension: skip storing to keep index consistent.
                 return
 
-            self._metas.append({k: record.get(k) for k in ["ts", "query", "model", "strategy", "user"]})
             if self._embeddings is None:
-                self._embeddings = emb.reshape(1, -1).astype(np.float32)
+                embeddings = emb.reshape(1, -1).astype(np.float32)
             else:
-                self._embeddings = np.concatenate([self._embeddings, emb.reshape(1, -1)], axis=0).astype(np.float32)
+                embeddings = np.concatenate([self._embeddings, emb.reshape(1, -1)], axis=0).astype(np.float32)
 
-        self._append_line(record)
+            # Keep file order consistent; failed writes are not published in the live index.
+            self._append_line(record)
+            self._metas.append({k: record.get(k) for k in ["ts", "query", "model", "strategy", "user"]})
+            self._embeddings = embeddings
 
     def retrieve(
         self,

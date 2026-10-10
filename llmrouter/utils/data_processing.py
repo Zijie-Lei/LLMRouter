@@ -15,6 +15,20 @@ from .embeddings import parallel_embedding_task
 from .tensor_utils import to_tensor
 from .dataframe_utils import clean_df
 
+
+def _replace_missing_values(value):
+    """Represent missing pandas/numpy values as JSON null, including metadata."""
+    if value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, (float, np.floating)) and np.isnan(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _replace_missing_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_replace_missing_values(item) for item in value]
+    return value
+
+
 def process_final_data(df_all):
     """
     Process final data to match process.py format
@@ -172,11 +186,6 @@ def process_unified_embeddings_and_routing(
             # Fallback: try to_tensor for string representations
             embedding_dict[embedding_id] = to_tensor(embedding)
     
-    # Save unified embeddings .pt file
-    os.makedirs(os.path.dirname(embedding_output_path), exist_ok=True)
-    torch.save(embedding_dict, embedding_output_path)
-    print(f"✅ Saved {len(embedding_dict)} unified embeddings to {embedding_output_path}")
-    
     # Step 4: Map embedding_id to routing data
     print("Mapping embedding_id to routing data...")
     
@@ -206,9 +215,7 @@ def process_unified_embeddings_and_routing(
     df_test_final = clean_df(df_test_with_ids)
     
     # Step 6: Format and save routing data JSONL files
-    print("Saving routing data files...")
-    os.makedirs(os.path.dirname(routing_train_output_path), exist_ok=True)
-    os.makedirs(os.path.dirname(routing_test_output_path), exist_ok=True)
+    print("Preparing routing data files...")
     
     # Format to match sample exactly: convert choices to JSON string, ensure all fields present
     def format_routing_record(row):
@@ -246,19 +253,33 @@ def process_unified_embeddings_and_routing(
         if 'gt' in record and 'ground_truth' not in record:
             record['ground_truth'] = record.pop('gt')
         
-        return record
-    
-    # Format and save train data
-    train_records = [format_routing_record(row) for _, row in df_train_final.iterrows()]
+        return _replace_missing_values(record)
+
+    # Validate both splits before replacing any existing output. NaN represents
+    # missing data; infinity and unsupported objects must raise a clear error.
+    train_lines = [
+        json.dumps(format_routing_record(row), ensure_ascii=False, allow_nan=False) + '\n'
+        for _, row in df_train_final.iterrows()
+    ]
+    test_lines = [
+        json.dumps(format_routing_record(row), ensure_ascii=False, allow_nan=False) + '\n'
+        for _, row in df_test_final.iterrows()
+    ]
+    # JSON can contain unpaired surrogates that a UTF-8 file cannot encode.
+    for lines in (train_lines, test_lines):
+        for line in lines:
+            line.encode('utf-8')
+
+    for path in (embedding_output_path, routing_train_output_path, routing_test_output_path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(embedding_dict, embedding_output_path)
+    print(f"✅ Saved {len(embedding_dict)} unified embeddings to {embedding_output_path}")
+
     with open(routing_train_output_path, 'w', encoding='utf-8') as f:
-        for record in train_records:
-            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+        f.writelines(train_lines)
     
-    # Format and save test data
-    test_records = [format_routing_record(row) for _, row in df_test_final.iterrows()]
     with open(routing_test_output_path, 'w', encoding='utf-8') as f:
-        for record in test_records:
-            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+        f.writelines(test_lines)
     
     print(f"✅ Final files saved:")
     print(f"  - {routing_train_output_path} ({len(df_train_final)} records)")

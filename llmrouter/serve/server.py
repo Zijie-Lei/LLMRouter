@@ -16,8 +16,10 @@ import json
 import os
 import sys
 import re
+import threading
 import time
 import uuid
+from copy import deepcopy
 from typing import AsyncGenerator, Optional, Dict, Any, List
 
 # FastAPI
@@ -25,6 +27,7 @@ try:
     from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
     from fastapi.responses import StreamingResponse
     from pydantic import BaseModel
+    from starlette.concurrency import run_in_threadpool
     import httpx
     import uvicorn
 except ImportError:
@@ -64,6 +67,7 @@ class RouterAdapter:
         self.fail_on_error = fail_on_error
         self.router = None
         self.last_router_info = None
+        self._route_lock = threading.RLock()
         self._load_router()
 
     def _load_router(self):
@@ -102,6 +106,23 @@ class RouterAdapter:
 
     def route(self, query: str, available_models: List[str]) -> str:
         """Select model"""
+        with self._route_lock:
+            self.last_router_info = None
+            return self._route_unlocked(query, available_models)
+
+    def route_with_info(self, query: str, available_models: List[str]):
+        """Return model and diagnostics from the same serialized routing call."""
+        with self._route_lock:
+            selected_model = self.route(query, available_models)
+            try:
+                info = deepcopy(self.last_router_info or {})
+            except Exception as exc:
+                # Optional logging metadata must not fail a successful route.
+                # Avoid retaining shallow mutable values from another request.
+                info = {"routing_reason": f"routing diagnostics unavailable: {type(exc).__name__}"}
+            return selected_model, info
+
+    def _route_unlocked(self, query: str, available_models: List[str]) -> str:
         if self.router is None:
             import random
             return random.choice(available_models)
@@ -281,10 +302,11 @@ def create_app(config: ServeConfig = None, config_path: str = None) -> FastAPI:
         available_models = list(config.llms.keys())
         if request.model == "auto" or request.model not in available_models:
             try:
-                selected_model = router_adapter.route(user_query, available_models)
+                selected_model, info = await run_in_threadpool(
+                    router_adapter.route_with_info, user_query, available_models,
+                )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"routing failed: {type(e).__name__}: {e}")
-            info = router_adapter.last_router_info or {}
             reason = info.get("routing_reason")
             signals = info.get("routing_signals")
             confidence = info.get("routing_confidence")
@@ -361,7 +383,7 @@ def create_app(config: ServeConfig = None, config_path: str = None) -> FastAPI:
             # Select model
             available_models = list(config.llms.keys())
             if request.model == "auto" or request.model not in available_models:
-                selected_model = router_adapter.route(user_query, available_models)
+                selected_model = await run_in_threadpool(router_adapter.route, user_query, available_models)
                 print(f"[WS Router] Query: '{user_query[:50]}...' -> {selected_model}")
             else:
                 selected_model = request.model

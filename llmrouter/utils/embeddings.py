@@ -3,6 +3,7 @@ Embedding utilities for LLMRouter scripts (Longformer version)
 """
 
 import os
+import threading
 import torch
 from transformers import AutoModel, AutoTokenizer
 
@@ -14,6 +15,19 @@ _MODEL_NAME: str = "allenai/longformer-base-4096"
 _tokenizer = None
 _model = None
 _device = None
+_init_lock = threading.Lock()
+_tokenization_lock = threading.Lock()
+
+
+def _select_device() -> torch.device:
+    device_override = (os.environ.get("LLMROUTER_EMBEDDING_DEVICE") or "").strip()
+    if device_override:
+        return torch.device(device_override)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def _get_device() -> torch.device:
@@ -26,30 +40,31 @@ def _get_device() -> torch.device:
     if _device is not None:
         return _device
 
-    device_override = (os.environ.get("LLMROUTER_EMBEDDING_DEVICE") or "").strip()
-    if device_override:
-        _device = torch.device(device_override)
-        return _device
-
-    if torch.cuda.is_available():
-        _device = torch.device("cuda")
-    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        _device = torch.device("mps")
-    else:
-        _device = torch.device("cpu")
+    with _init_lock:
+        if _device is None:
+            _device = _select_device()
     return _device
 
 
 def _init_model():
     """Initialize tokenizer/model on first use."""
-    global _tokenizer, _model
+    global _tokenizer, _model, _device
     if _tokenizer is not None and _model is not None:
         return
 
-    device = _get_device()
-    _tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
-    _model = AutoModel.from_pretrained(_MODEL_NAME).to(device)
-    _model.eval()
+    with _init_lock:
+        if _tokenizer is not None and _model is not None:
+            return
+
+        device = _device if _device is not None else _select_device()
+        tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
+        model = AutoModel.from_pretrained(_MODEL_NAME).to(device)
+        model.eval()
+
+        # Failed downloads or setup leave the cache untouched and retryable.
+        _device = device
+        _tokenizer = tokenizer
+        _model = model
 
 
 def get_longformer_embedding(texts):
@@ -76,13 +91,16 @@ def get_longformer_embedding(texts):
     # 3. Tokenization
     # -------------------------
     device = _get_device()
-    inputs = _tokenizer(
-        texts,
-        padding=True,
-        truncation=True,
-        max_length=4096,
-        return_tensors="pt",
-    ).to(device)
+    # Fast tokenizers mutate their shared padding/truncation configuration.
+    with _tokenization_lock:
+        inputs = _tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=4096,
+            return_tensors="pt",
+        )
+    inputs = inputs.to(device)
 
     # -------------------------
     # 4. Model forward pass

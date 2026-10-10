@@ -1,6 +1,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("llmrouter")
+    __version__ = version("llmrouter-lib")
 except PackageNotFoundError:  # pragma: no cover
-    __version__ = "0.1.0"
+    # A source checkout without installed metadata has no verified release version.
+    __version__ = "0+unknown"
