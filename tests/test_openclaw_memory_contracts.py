@@ -218,13 +218,118 @@ def test_yaml_memory_config_controls_real_bank_storage_and_retrieval(tmp_path, l
     assert bank.retrieve("east", user="missing") == []
 
 
-@pytest.mark.parametrize("invalid_record", ["[]", "17"])
-@pytest.mark.xfail(strict=True, raises=AttributeError, reason="Known bug: valid non-object JSONL records crash memory reload instead of being skipped")
+@pytest.mark.parametrize("invalid_record", [
+    "[]", "17", "null", "true", '"scalar"',
+    pytest.param("1" * 10000, id="integer-digit-limit"),
+])
 def test_non_object_jsonl_records_do_not_discard_valid_history(tmp_path, local_encoder, invalid_record):
     cfg = config_for(tmp_path)
     bank = MemoryBank(cfg)
     bank.add("east", "small")
     bank.add("north", "large")
     lines = bank.path.read_text(encoding="utf-8").splitlines()
-    bank.path.write_text("\n".join([lines[0], invalid_record, lines[1]]) + "\n", encoding="utf-8")
+    bank.path.write_text("\n".join([invalid_record, lines[0], invalid_record, lines[1]]) + "\n", encoding="utf-8")
+    original_file = bank.path.read_bytes()
     assert [item["model"] for item in MemoryBank(cfg).retrieve("east")] == ["small", "large"]
+    assert bank.path.read_bytes() == original_file
+
+
+def test_excessively_nested_json_does_not_abort_valid_history_loading(tmp_path, local_encoder):
+    cfg = config_for(tmp_path)
+    bank = MemoryBank(cfg)
+    bank.add("east", "small")
+    bank.add("north", "large")
+    lines = bank.path.read_text(encoding="utf-8").splitlines()
+    depth = 10000
+    invalid = "[" * depth + "0" + "]" * depth
+    with pytest.raises(RecursionError):
+        json.loads(invalid)
+    bank.path.write_text("\n".join([invalid, lines[0], invalid, lines[1]]) + "\n", encoding="utf-8")
+    original_file = bank.path.read_bytes()
+    assert [item["model"] for item in MemoryBank(cfg).retrieve("east")] == ["small", "large"]
+    assert bank.path.read_bytes() == original_file
+
+
+@pytest.mark.parametrize("field, value", [
+    *[(field, value) for field in ("query", "model") for value in (None, False, 17, [], {})],
+    *[("emb_b64", value) for value in (None, 17, [], {})],
+    ("ts", {}), ("strategy", []), ("user", 17),
+])
+def test_invalid_history_field_types_are_skipped_without_affecting_valid_records(tmp_path, local_encoder, field, value):
+    cfg = config_for(tmp_path)
+    bank = MemoryBank(cfg)
+    bank.add("east", "small", strategy="llm", user="alice")
+    bank.add("north", "large", strategy="rules", user="bob")
+    lines = bank.path.read_text(encoding="utf-8").splitlines()
+    invalid = {**json.loads(lines[0]), "model": "invalid", field: value}
+    invalid_line = json.dumps(invalid)
+    bank.path.write_text("\n".join([invalid_line, lines[0], invalid_line, lines[1]]) + "\n", encoding="utf-8")
+    previous_file = bank.path.read_bytes()
+
+    reloaded = MemoryBank(cfg)
+    results = reloaded.retrieve("east")
+    assert [item["model"] for item in results] == ["small", "large"]
+    assert [item["score"] for item in results] == pytest.approx([1., 0.])
+    assert reloaded.retrieve("east", strategy_filter="llm")[0]["user"] == "alice"
+    assert bank.path.read_bytes() == previous_file
+    reloaded.add("west", "later")
+    assert [item["model"] for item in MemoryBank(cfg).retrieve("east")] == ["small", "large", "later"]
+
+
+def encoded_vector(values):
+    return base64.b64encode(np.asarray(values, dtype=np.float32).tobytes()).decode("ascii")
+
+
+@pytest.mark.parametrize("payload", [
+    "", "%%%", "éé", "AA==", encoded_vector([1., 0., 0.]) + "#",
+    encoded_vector([float("nan"), 0., 0.]),
+    encoded_vector([float("inf"), 0., 0.]),
+    encoded_vector([float("-inf"), 0., 0.]),
+    encoded_vector([0., 0.]),
+    encoded_vector([3e38, 3e38]),
+])
+def test_invalid_embeddings_do_not_poison_history_dimensions_or_ranking(tmp_path, local_encoder, payload):
+    cfg = config_for(tmp_path)
+    bank = MemoryBank(cfg)
+    bank.add("east", "small")
+    bank.add("north", "large")
+    lines = bank.path.read_text(encoding="utf-8").splitlines()
+    invalid = json.dumps({"query": "west", "model": "invalid", "emb_b64": payload})
+    bank.path.write_text("\n".join([invalid, lines[0], invalid, lines[1]]) + "\n", encoding="utf-8")
+    previous_file = bank.path.read_bytes()
+    results = MemoryBank(cfg).retrieve("east")
+    assert [item["model"] for item in results] == ["small", "large"]
+    assert [item["score"] for item in results] == pytest.approx([1., 0.])
+    assert bank.path.read_bytes() == previous_file
+
+
+def test_older_records_without_optional_metadata_remain_readable(tmp_path, local_encoder):
+    cfg = config_for(tmp_path)
+    bank = MemoryBank(cfg)
+    bank.add("east", "small")
+    record = json.loads(bank.path.read_text(encoding="utf-8"))
+    for field in ("ts", "strategy", "user"):
+        record.pop(field)
+    bank.path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert MemoryBank(cfg).retrieve("east") == [{
+        "query": "east", "model": "small", "score": pytest.approx(1.),
+        "ts": None, "strategy": None, "user": None,
+    }]
+
+
+def test_unreadable_history_path_preserves_existing_optional_memory_behavior(tmp_path, local_encoder):
+    cfg = config_for(tmp_path)
+    Path(cfg.path).mkdir(parents=True)
+    bank = MemoryBank(cfg)
+    assert bank.retrieve("east") == []
+    assert local_encoder.downloads == []
+
+
+def test_unrecoverable_text_decoding_failure_is_not_silently_ignored(tmp_path, local_encoder):
+    cfg = config_for(tmp_path)
+    path = Path(cfg.path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe")
+    with pytest.raises(UnicodeDecodeError):
+        MemoryBank(cfg)
+    assert local_encoder.downloads == []

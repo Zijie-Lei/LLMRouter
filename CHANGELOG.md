@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Use direct dataset conversion when LLM mode has no usable API key, preserving
+  records through the existing fallback.
+- Write missing routing values as JSON `null` and validate both routing splits
+  before replacing existing embedding and JSONL outputs.
+- Recover valid saved routing history when other records have malformed JSON,
+  invalid fields, or corrupt embeddings.
 - Include bundled YAML resources in wheel and source distributions.
 - Report the installed `llmrouter-lib` version correctly.
 - Return a failing CLI exit status for failed inference and propagate provider

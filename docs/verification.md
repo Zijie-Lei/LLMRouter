@@ -1,6 +1,49 @@
 # Verification and independent review
 
-This records local and hosted verification on October 9, 2026 for the
+## Conversion and saved-history recovery (October 10, 2026)
+
+The `conversion-memory-recovery` branch fixes three defects recorded by the
+coverage expansion: missing-key conversion drops rows, missing embedding IDs
+produce invalid JSON, and malformed saved history interrupts loading.
+
+The converter uses its existing direct fallback for absent, empty, or blank
+module API keys without calling a provider. Routing output replaces missing
+scalar and nested metadata values with JSON `null`; infinity and unsupported
+objects raise before any existing embedding or routing output is replaced.
+This validation does not make the three filesystem writes atomic.
+
+History recovery skips invalid row shapes, fields, base64/float32 payloads,
+zero or overflowed vector norms, and JSON parser depth/integer-limit failures.
+Actual-file regressions place corrupt records before and between valid records,
+verify retrieval and append/reload, and confirm loading leaves saved bytes
+unchanged. Existing unrecoverable text decoding behavior remains explicit.
+
+| Local check | Result |
+| --- | --- |
+| Offline core suite, sockets disabled, Python 3.12 | 668 passed; 2 CUDA skips; 17 strict expected failures |
+| Offline FusionGate suite, separate process | 54 passed |
+| Core executed-line coverage | 48.96% (7,003 / 14,304 lines) |
+| Python correctness and changed-file whitespace | Ruff and `git diff --check` passed |
+
+Five previously expected failures are normal passing regressions, with 48
+additional passing boundary cases. The other 17 known defects remain recorded
+as strict expected failures. Dependencies and workflow configuration are
+unchanged in this fix pass.
+
+Two independent reviewers cross-checked the converter, JSON processing, and
+memory changes in the shared workspace. Findings led to parser depth/number
+guards, rejection of zero/overflowed vector norms before index dimension
+selection, and a recursion test that verifies the parser actually raises.
+Both reviewers approved the revised production changes and regressions.
+
+The fork now enforces its active `Require CI on main` ruleset with GitHub
+Actions' `CI` check and up-to-date branches. The deliberate failing PR #2 is
+blocked. The original CI PR #1 remains open; this fix branch is based on its
+tested commit `c51345f` and depends on that foundation.
+
+## Earlier CI verification
+
+The following records local and hosted verification on October 9, 2026 for the
 `codex/pr-ci-guardrails` workstream. Release environment approval and publication
 remain untested.
 
@@ -51,8 +94,8 @@ exactly one intentional test failure in each Python version, and the aggregate
 `CI` check failed. Other checks passed and failed-run test artifacts were
 available. The deliberate test is absent from `codex/pr-ci-guardrails`.
 
-The fork's `main` remains unchanged. Requiring passing checks before merging
-still needs an active branch rule or ruleset.
+At that initial verification, the fork's `main` remained unchanged and had no
+active branch rule. The required-check ruleset described above is now active.
 
 ## Incremental coverage expansion
 

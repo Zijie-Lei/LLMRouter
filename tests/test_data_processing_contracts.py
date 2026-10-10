@@ -27,8 +27,12 @@ class ReverseCompletionPool:
         return iter(reversed([function(task) for task in tasks]))
 
 
+def reject_non_json_constant(value):
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
 def read_jsonl(path):
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return [json.loads(line, parse_constant=reject_non_json_constant) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_final_processing_deduplicates_embeddings_without_reordering_model_rows(tmp_path, monkeypatch):
@@ -117,6 +121,7 @@ def test_unified_processing_uses_one_id_across_splits_and_preserves_failed_embed
     train_rows, test_rows = read_jsonl(output / "train.jsonl"), read_jsonl(output / "test.jsonl")
     assert [row["model_name"] for row in train_rows + test_rows] == ["a", "b", "c", "d"]
     assert train_rows[0]["embedding_id"] == 0
+    assert train_rows[1]["embedding_id"] is None
     assert [row["embedding_id"] for row in test_rows] == [1, 0]
     assert train_rows[0]["ground_truth"] == ["a", "alias"]
     assert train_rows[0]["choices"] == "{'A': 'one', 'B': 'two'}"
@@ -157,12 +162,11 @@ def test_unified_processing_keeps_unmatched_routing_rows_without_fabricating_emb
     )
     assert set(vectors) == {0}
     assert pd.isna(train.loc[0, "embedding_id"])
-    assert pd.isna(read_jsonl(tmp_path / "train.jsonl")[0]["embedding_id"])
+    assert read_jsonl(tmp_path / "train.jsonl")[0]["embedding_id"] is None
     assert test.empty and read_jsonl(tmp_path / "test.jsonl") == []
 
 
 @pytest.mark.parametrize("failure_mode", ["encoder_failure", "unmatched_query"])
-@pytest.mark.xfail(strict=True, raises=ValueError, reason="Existing defect: missing embedding IDs serialize as NaN, which is not valid JSON, instead of null")
 def test_missing_embedding_ids_are_written_as_valid_json_null(tmp_path, monkeypatch, failure_mode):
     def encode(text):
         if failure_mode == "encoder_failure" and text == "broken":
@@ -181,13 +185,59 @@ def test_missing_embedding_ids_are_written_as_valid_json_null(tmp_path, monkeypa
         str(tmp_path / "vectors.pt"), str(tmp_path / "train.jsonl"), str(tmp_path / "test.jsonl"),
     )
 
-    def reject_non_json_constant(value):
-        raise ValueError(f"Invalid JSON constant: {value}")
-
     lines = (tmp_path / "train.jsonl").read_text().splitlines()
     assert json.loads(lines[0])["embedding_id"] == 0
     record = json.loads(lines[1], parse_constant=reject_non_json_constant)
     assert record["embedding_id"] is None
+
+
+def test_missing_metadata_is_null_in_both_splits_without_changing_valid_values(tmp_path, monkeypatch):
+    monkeypatch.setattr(embeddings, "get_longformer_embedding", lambda text: [1.0])
+    query = {"task_name": "task", "query": "café", "ground_truth": ["answer", "alias"], "metric": "em"}
+    rows = [
+        {**query, "model_name": "first", "score": np.nan, "metadata": {"missing": pd.NA, "items": [np.float32("nan"), pd.NaT, "valid", 0, False]}},
+        {**query, "query": "unmatched", "model_name": "second", "score": 0.75, "metadata": None},
+    ]
+    frame = pd.DataFrame(rows)
+    snapshot = pd.DataFrame(deepcopy(frame.to_dict("records")))
+    vectors, train, test = data_processing.process_unified_embeddings_and_routing(
+        frame, frame.iloc[::-1], [query], [],
+        str(tmp_path / "vectors.pt"), str(tmp_path / "train.jsonl"), str(tmp_path / "test.jsonl"),
+    )
+
+    pd.testing.assert_frame_equal(frame, snapshot)
+    actual_train = read_jsonl(tmp_path / "train.jsonl")
+    actual_test = read_jsonl(tmp_path / "test.jsonl")
+    assert actual_test == list(reversed(actual_train))
+    assert [record["embedding_id"] for record in actual_train] == [0, None]
+    assert actual_train[0]["score"] is None
+    assert actual_train[0]["metadata"] == {"missing": None, "items": [None, None, "valid", 0, False]}
+    assert actual_train[0]["query"] == "café" and actual_train[0]["ground_truth"] == ["answer", "alias"]
+    assert actual_train[1]["score"] == 0.75 and actual_train[1]["metadata"] is None
+    assert pd.isna(train.iloc[0]["score"]) and pd.isna(test.iloc[0]["embedding_id"])
+    assert list(vectors) == [0]
+
+
+@pytest.mark.parametrize("bad_value, error", [(float("inf"), ValueError), (float("-inf"), ValueError), ({"nested": float("inf")}, ValueError), ({"unsupported"}, TypeError)])
+@pytest.mark.parametrize("bad_split", ["train", "test"])
+def test_invalid_json_output_raises_before_replacing_existing_files(tmp_path, monkeypatch, capsys, bad_value, error, bad_split):
+    monkeypatch.setattr(embeddings, "get_longformer_embedding", lambda text: [1.0])
+    query = {"task_name": "task", "query": "known", "ground_truth": "answer", "metric": "em"}
+    frame = pd.DataFrame([{**query, "metadata": {"valid": True}}])
+    invalid = pd.DataFrame([{**query, "metadata": bad_value}])
+    paths = [tmp_path / name for name in ("vectors.pt", "train.jsonl", "test.jsonl")]
+    for path in paths:
+        path.write_bytes(b"previous output")
+
+    with pytest.raises(error, match="Out of range float|not JSON serializable"):
+        data_processing.process_unified_embeddings_and_routing(
+            invalid if bad_split == "train" else frame,
+            invalid if bad_split == "test" else frame,
+            [query], [], *(str(path) for path in paths),
+        )
+
+    assert [path.read_bytes() for path in paths] == [b"previous output"] * 3
+    assert "Final files saved" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("force_reverse_completion", [False, True])

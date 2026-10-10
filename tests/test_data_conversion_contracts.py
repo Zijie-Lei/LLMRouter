@@ -4,6 +4,7 @@ import importlib
 import json
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -180,11 +181,13 @@ def test_bad_test_record_does_not_abort_later_records(converter, tmp_path, capsy
     assert len(batch) == 1 and batch[0]["id"] == "default_21"
 
 
-def test_parallel_conversion_calls_provider_and_preserves_all_record_identities(converter, tmp_path, monkeypatch):
+@pytest.mark.parametrize("api_key", ["test-key", " padded-key "])
+def test_parallel_conversion_calls_provider_and_preserves_all_record_identities(converter, tmp_path, monkeypatch, api_key):
     source, output = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
     rows = [{"query": f"query-{i}", "task_name": "mbpp"} for i in range(5)]
     write_jsonl(source, rows)
-    monkeypatch.setattr(converter, "API_KEYS", "test-key")
+    monkeypatch.setattr(converter, "API_KEYS", api_key)
+    monkeypatch.setenv("API_KEYS", "different-environment-key")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.test/v1")
     calls = []
 
@@ -203,16 +206,57 @@ def test_parallel_conversion_calls_provider_and_preserves_all_record_identities(
     assert [r["id"] for r in records] == [f"mbpp_{i}" for i in range(5)]
     assert all(r["ability"] == "logical-reasoning" for r in records)
     assert len(calls) == len(rows)
-    assert all(call["api_key"] == "test-key" and call["api_base"] == "https://example.test/v1" for call in calls)
+    assert all(call["api_key"] == api_key and call["api_base"] == "https://example.test/v1" for call in calls)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="Existing defect: LLM mode without a key silently writes no records instead of using the announced direct-conversion fallback")
-def test_parallel_conversion_without_key_falls_back_without_losing_records(converter, tmp_path, monkeypatch):
+@pytest.mark.parametrize("api_key", [None, "", " \t\n "], ids=["missing", "empty", "whitespace"])
+def test_parallel_conversion_without_key_falls_back_without_losing_records(converter, tmp_path, monkeypatch, capsys, api_key):
     source, output = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
-    write_jsonl(source, [{"query": "keep this row"}])
-    monkeypatch.setattr(converter, "API_KEYS", None)
+    rows = [
+        {"query": "二加二?", "ground_truth": 4, "task_name": "gsm8k"},
+        {"query": "write a function", "ground_truth": ["solution"], "task_name": "mbpp"},
+        {"query": "keep this row", "ground_truth": "answer"},
+    ]
+    write_jsonl(source, rows)
+    monkeypatch.setattr(converter, "API_KEYS", api_key)
+    # The converter's existing key source is the module setting, not the
+    # environment; a valid endpoint must not trigger calls with a blank key.
+    monkeypatch.setenv("API_KEYS", "different-environment-key")
+    monkeypatch.setenv("OPENAI_API_BASE", "https://example.test/v1")
+    complete = Mock()
+    monkeypatch.setattr(converter, "completion", complete)
+
     converter.convert_data(str(source), str(output), use_llm=True, max_workers=2)
-    assert [r["question"] for r in read_jsonl(output)] == ["keep this row"]
+
+    records = read_jsonl(output)
+    assert [r["question"] for r in records] == [r["query"] for r in rows]
+    assert [r["id"] for r in records] == ["gsm8k_0", "mbpp_1", "default_2"]
+    assert [r["extra_info"] for r in records] == [{"index": i, "split": "test"} for i in range(3)]
+    assert [r["ability"] for r in records] == ["math-reasoning", "code-generation", "fact-reasoning"]
+    assert [r["golden_answers"] for r in records] == [["4"], ["solution"], ["answer"]]
+    assert [r["reward_model"]["ground_truth"]["target"] for r in records] == [["4"], ["solution"], ["answer"]]
+    complete.assert_not_called()
+    stdout = capsys.readouterr().out
+    assert "Warning: API key not found" in stdout
+    assert "Converting records directly (without using LLM)" in stdout
+
+
+def test_no_key_fallback_recovers_after_bad_record_with_original_indices(converter, tmp_path, monkeypatch, capsys):
+    source, output = tmp_path / "in.jsonl", tmp_path / "out.jsonl"
+    write_jsonl(source, [{"query": "outside"}, {"query": "before"}, None, {"query": "after"}])
+    monkeypatch.setattr(converter, "API_KEYS", None)
+    monkeypatch.setenv("OPENAI_API_BASE", "https://example.test/v1")
+    complete = Mock()
+    monkeypatch.setattr(converter, "completion", complete)
+
+    converter.convert_data(str(source), str(output), use_llm=True, max_workers=2, start_line=2)
+
+    records = read_jsonl(output)
+    assert [r["question"] for r in records] == ["before", "after"]
+    assert [r["id"] for r in records] == ["default_1", "default_3"]
+    assert [r["extra_info"]["index"] for r in records] == [1, 3]
+    complete.assert_not_called()
+    assert "Error processing record 2" in capsys.readouterr().out
 
 
 def test_training_conversion_keeps_model_response_cost_and_performance_aligned(converter, tmp_path):
